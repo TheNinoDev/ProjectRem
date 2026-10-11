@@ -153,9 +153,11 @@ if "!PUSH_GIT!"=="1" (
 
     git diff --cached --quiet
     if errorlevel 1 (
-        rem  Use the newest commit subject as the message, so a push right
-        rem  after a working session reads sensibly.
-        for /f "delims=" %%m in ('powershell -NoProfile -Command "git log -1 --pretty=format:'%%s' 2^>$null"') do set "MSG=%%m"
+        rem  Reuse the newest commit subject so a push right after a working
+        rem  session reads sensibly. `git log` can fail (an empty repo, a
+        rem  corrupt ref), so fall back to a generic message.
+        set "MSG="
+        for /f "delims=" %%m in ('git log -1 --pretty=format:%%s 2^>nul') do set "MSG=%%m"
         if not defined MSG set "MSG=ProjectRem update"
         git commit -m "!MSG!"
         if errorlevel 1 (

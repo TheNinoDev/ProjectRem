@@ -219,3 +219,5 @@ major is unbounded, minor and patch run from 0 to 10. See
   (`{"name": …, "version": …, "author": …, "description": …}`) imported through
   the Plugins tab.
 * **New Worker endpoints** — see [docs/WORKER.md](docs/WORKER.md).
+
+<!-- push.bat smoke test -->
