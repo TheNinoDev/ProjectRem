@@ -31,7 +31,45 @@ pub const TEXT_NORMAL: Color32 = Color32::from_rgb(0xD2, 0xD5, 0xDB);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x93, 0x98, 0xA3);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6E, 0x74, 0x80);
 
+// Spacing -----------------------------------------------------------------
+
+/// A 4-point spacing scale.
+///
+/// Every gap, padding and margin in the app is one of these. The layout used
+/// to use hand-picked numbers per widget, which is why the pages did not line
+/// up with each other; picking from a scale is what makes them consistent.
+pub mod space {
+    /// 4 - between an icon and its label.
+    pub const XS: f32 = 4.0;
+    /// 8 - between related controls.
+    pub const SM: f32 = 8.0;
+    /// 12 - between a label and the field under it.
+    pub const MD: f32 = 12.0;
+    /// 16 - card padding.
+    pub const LG: f32 = 16.0;
+    /// 24 - the page gutter, and the gap between sections.
+    pub const XL: f32 = 24.0;
+    /// 32 - between major groups.
+    pub const XXL: f32 = 32.0;
+}
+
+/// Padding inside a card.
+pub const CARD_PADDING: f32 = space::LG;
+/// Inset of the page body from the window edge, and of the header / action-bar
+/// content. One value, so the header, body and bar all line up on the left.
+pub const PAGE_PADDING: f32 = space::XL;
+/// Vertical gap between two sections on a page.
+pub const SECTION_GAP: f32 = space::XL;
+
+/// Page content is not allowed to run the full width of a wide window: a
+/// 1500 px-wide card holding one short line of text reads badly. The body is
+/// centred inside this width instead.
+pub const CONTENT_MAX_WIDTH: f32 = 1000.0;
+
 // Metrics ----------------------------------------------------------------
+/// Height of one sidebar navigation row.
+pub const NAV_ROW_HEIGHT: f32 = 38.0;
+
 pub const SIDEBAR_WIDTH: f32 = 236.0;
 pub const HEADER_HEIGHT: f32 = 66.0;
 pub const ACTION_BAR_HEIGHT: f32 = 62.0;
@@ -75,13 +113,18 @@ pub fn style() -> Style {
 
     style.visuals = visuals;
 
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.spacing.menu_margin = egui::Margin::same(6);
+    // Spacing comes from the scale too, so egui's own widgets sit on the same
+    // rhythm as the hand-drawn ones.
+    style.spacing.item_spacing = egui::vec2(space::SM, space::SM);
+    style.spacing.button_padding = egui::vec2(space::MD, space::SM);
+    style.spacing.menu_margin = egui::Margin::same(space::SM as i8);
     style.spacing.interact_size.y = 26.0;
     style.spacing.slider_width = 180.0;
     style.spacing.scroll.bar_width = 10.0;
     style.spacing.scroll.floating = true;
+    // egui adds `item_spacing.y` after each label; the pages add their own
+    // section gaps, so that would double up.
+    style.spacing.text_edit_width = 240.0;
 
     style.text_styles.insert(
         egui::TextStyle::Heading,

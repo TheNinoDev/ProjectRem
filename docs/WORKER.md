@@ -73,8 +73,20 @@ Picking **None** in the app clears it again.
 
 ### Tokens
 
-API tokens are write-only. `GET /api/tokens/<provider>` reports whether one is
-stored and when, never the value.
+`GET /api/tokens/<provider>` is write-only: it reports whether a token is
+stored and when, never the value. Every screen in the app uses that one.
+
+There is exactly one route that hands back the secret:
+
+```
+GET /api/tokens/huggingface/download  ->  { "ok": true, "token": "hf_..." }
+```
+
+The app calls it so model downloads carry `Authorization: Bearer <token>`
+instead of falling back to Hugging Face's small anonymous quota. It is a
+separate route on purpose — only the signed-in owner, on their own machine,
+ever receives it. With no token stored it answers 404, which is the normal
+case rather than an error.
 
 ## Endpoints
 
@@ -110,7 +122,8 @@ All authenticated routes need `Authorization: Bearer <session token>`.
 | Method | Path | Result |
 | --- | --- | --- |
 | `PUT` | `/api/tokens/<provider>` | stores the token; never returns it |
-| `GET` | `/api/tokens/<provider>` | `{ stored, created_at }` |
+| `GET` | `/api/tokens/<provider>` | `{ stored, created_at }` — never the value |
+| `GET` | `/api/tokens/huggingface/download` | `{ token }` — the owner's own token, for downloads |
 | `GET` | `/api/bots` | the user's bots |
 | `POST` | `/api/bots` | creates one |
 | `PATCH` | `/api/bots/<id>` | updates one |

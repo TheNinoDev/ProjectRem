@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -118,6 +119,8 @@ pub struct Downloader {
     events: Receiver<Event>,
     commands: Sender<Command>,
     cancel: Arc<AtomicBool>,
+    /// Shared with the download thread; `None` in a test-only downloader.
+    token: Option<Arc<RwLock<Option<String>>>>,
 }
 
 impl Downloader {
@@ -125,8 +128,10 @@ impl Downloader {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (evt_tx, evt_rx) = mpsc::channel::<Event>();
         let cancel = Arc::new(AtomicBool::new(false));
+        let token = Arc::new(RwLock::new(None));
 
         let worker_cancel = Arc::clone(&cancel);
+        let worker_token = Arc::clone(&token);
         thread::Builder::new()
             .name("projectrem-downloads".into())
             .spawn(move || {
@@ -141,11 +146,11 @@ impl Downloader {
                         return;
                     }
                 };
-                worker_loop(cmd_rx, evt_tx, worker_cancel, client);
+                worker_loop(cmd_rx, evt_tx, worker_cancel, client, worker_token);
             })
             .ok();
 
-        Self { events: evt_rx, commands: cmd_tx, cancel }
+        Self { events: evt_rx, commands: cmd_tx, cancel, token: Some(token) }
     }
 
     /// Queue one model.
@@ -168,6 +173,20 @@ impl Downloader {
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Hugging Face bearer token for the next downloads.
+    ///
+    /// Without one, downloads use Hugging Face's anonymous quota, which is
+    /// small and shared. The token belongs to the user (it comes from their
+    /// account on the Worker) so using it here is exactly what they asked for
+    /// by saving it. Changing it mid-queue takes effect on the next file.
+    pub fn set_token(&self, token: Option<String>) {
+        if let Some(slot) = &self.token {
+            if let Ok(mut guard) = slot.write() {
+                *guard = token;
+            }
+        }
     }
 
     /// Drain everything the worker has reported since the last frame.
@@ -196,6 +215,7 @@ fn worker_loop(
     evt_tx: Sender<Event>,
     cancel: Arc<AtomicBool>,
     client: reqwest::blocking::Client,
+    token: Arc<RwLock<Option<String>>>,
 ) {
     let mut queue: VecDeque<DownloadJob> = VecDeque::new();
 
@@ -225,7 +245,8 @@ fn worker_loop(
         }
 
         if let Some(job) = queue.pop_front() {
-            run_job(&job, &client, &evt_tx, &cancel);
+            let auth = token.read().ok().and_then(|t| t.clone());
+            run_job(&job, &client, &evt_tx, &cancel, auth.as_deref());
         }
     }
 }
@@ -235,8 +256,17 @@ fn run_job(
     client: &reqwest::blocking::Client,
     evt_tx: &Sender<Event>,
     cancel: &Arc<AtomicBool>,
+    token: Option<&str>,
 ) {
     let _ = evt_tx.send(Event::Started { model_id: job.model_id.clone() });
+
+    // Every request for this job gets the user's token, so downloads use their
+    // quota instead of the shared anonymous one. `bearer_auth` on a `None`
+    // token would send "Bearer " with an empty value, hence the branch.
+    let authorized = |request: reqwest::blocking::RequestBuilder| match token {
+        Some(value) => request.bearer_auth(value),
+        None => request,
+    };
 
     let dest_dir = paths::model_dir(&job.model_id);
 
@@ -262,7 +292,7 @@ fn run_job(
             return;
         }
         let url = hf_url(&job.repo, &job.revision, file);
-        if let Ok(response) = client.head(&url).send() {
+        if let Ok(response) = authorized(client.head(&url)).send() {
             if response.status().is_success() {
                 total += response.content_length().unwrap_or(0);
             }
@@ -279,7 +309,7 @@ fn run_job(
         }
 
         let url = hf_url(&job.repo, &job.revision, &file);
-        let response = match client.get(&url).send() {
+        let response = match authorized(client.get(&url)).send() {
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 let _ = evt_tx.send(Event::Failed {
@@ -425,5 +455,74 @@ mod tests {
             started: Instant::now(),
         };
         assert_eq!(unknown.fraction(), None);
+    }
+
+    /// The saved Hugging Face token only helps if it actually reaches the HTTP
+    /// request. Checked against a real listener rather than a mock, because the
+    /// bug this guards against is a header that was simply never added.
+    #[test]
+    fn a_saved_token_is_sent_as_a_bearer_header() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // Answer one request and capture its headers.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let seen = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let read = socket.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..read]).to_string();
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            head
+        });
+
+        let client = reqwest::blocking::Client::new();
+        let url = format!("http://127.0.0.1:{port}/model.gguf");
+        let authorized = |request: reqwest::blocking::RequestBuilder| match Some("hf_secret") {
+            Some(value) => request.bearer_auth(value),
+            None => request,
+        };
+        let _ = authorized(client.get(&url)).send();
+
+        let head = seen.join().expect("server thread");
+        assert!(
+            head.to_lowercase().contains("authorization: bearer hf_secret"),
+            "the token never reached the request:\n{head}"
+        );
+    }
+
+    /// Without a token we must not send a bare `Authorization: Bearer` header -
+    /// Hugging Face rejects that, and it would break anonymous downloads for
+    /// everyone who has not saved one.
+    #[test]
+    fn no_token_means_no_authorization_header() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let seen = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let read = socket.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..read]).to_string();
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            head
+        });
+
+        let client = reqwest::blocking::Client::new();
+        let url = format!("http://127.0.0.1:{port}/model.gguf");
+        let authorized = |request: reqwest::blocking::RequestBuilder| match None::<&str> {
+            Some(value) => request.bearer_auth(value),
+            None => request,
+        };
+        let _ = authorized(client.get(&url)).send();
+
+        let head = seen.join().expect("server thread");
+        assert!(
+            !head.to_lowercase().contains("authorization"),
+            "an anonymous download must not carry an auth header:\n{head}"
+        );
     }
 }

@@ -4,26 +4,22 @@
 // keeps the UI thread free of aliasing problems and makes the pages easy to
 // reason about: render, report at most one action, done.
 
+/// The Main page.
+///
+/// Deliberately just a short welcome. This is the page the app opens on and
+/// there is nothing to do here yet, so the status list it used to show is
+/// gone on purpose - do not fill it with panels until there is a feature to
+/// put in them.
 fn view_main(ui: &mut Ui, data: &MainView<'_>) {
     scroll(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.add_space(8.0);
+        ui.add_space(theme::space::XXL);
 
-        widgets::card(ui, |ui| {
-            ui.label(RichText::new(data.title).size(17.0).strong().color(theme::TEXT_STRONG));
-            ui.add_space(6.0);
-            ui.label(RichText::new(data.body).size(14.0).color(theme::TEXT_NORMAL));
-            ui.add_space(10.0);
-            ui.label(RichText::new(&data.stamp).size(12.0).color(theme::TEXT_FAINT));
-        });
-
-        ui.add_space(16.0);
-        ui.label(RichText::new(data.status_label).size(13.0).strong().color(theme::TEXT_STRONG));
-        ui.add_space(8.0);
-        for (label, value, ok) in &data.rows {
-            widgets::status_row(ui, label, value, *ok);
-        }
-        ui.add_space(12.0);
+        ui.label(RichText::new(data.title).size(24.0).strong().color(theme::TEXT_STRONG));
+        ui.add_space(theme::space::SM);
+        ui.label(RichText::new(data.body).size(14.0).color(theme::TEXT_MUTED));
+        ui.add_space(theme::space::LG);
+        ui.label(RichText::new(&data.stamp).size(12.0).color(theme::TEXT_FAINT));
     });
 }
 
@@ -32,19 +28,29 @@ fn view_models(ui: &mut Ui, data: &ModelsView) -> Option<usize> {
     let mut pressed = None;
     scroll(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.add_space(8.0);
-        for (index, (model, state, missing)) in data.models.iter().enumerate() {
-            if model_card(ui, model, state, *missing) {
+        for (index, (model, state, missing, size)) in data.models.iter().enumerate() {
+            if model_card(ui, model, state, *missing, *size) {
                 pressed = Some(index);
             }
         }
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
     });
     pressed
 }
 
-/// Returns 	rue when the Download / Cancel button was clicked.
-fn model_card(ui: &mut Ui, model: &ModelDef, state: &DownloadState, missing: usize) -> bool {
+/// Bytes currently on disk for a downloaded model.
+fn bytes_on_disk(model: &ModelDef) -> u64 {
+    model.source.size_on_disk(&model.id)
+}
+
+/// Returns `true` when the Download / Cancel button was clicked.
+fn model_card(
+    ui: &mut Ui,
+    model: &ModelDef,
+    state: &DownloadState,
+    missing: usize,
+    real_bytes: Option<u64>,
+) -> bool {
     let i18n = I18n::new(Language::English);
     let t: Tr = I18n::t;
     let active = state.is_active();
@@ -78,10 +84,21 @@ fn model_card(ui: &mut Ui, model: &ModelDef, state: &DownloadState, missing: usi
         });
 
         ui.add_space(10.0);
+        // Prefer the size Hugging Face reports; fall back to the catalog's
+        // rough figure until it answers, and say which one is on screen.
+        let (bytes, exact) = match real_bytes {
+            Some(bytes) => (bytes, true),
+            None => (model.approx_bytes, false),
+        };
+        let size_text = match (exact, state) {
+            (true, DownloadState::Done) => format!("{} / {}", paths::human_bytes(bytes), paths::human_bytes(bytes_on_disk(model))),
+            (true, _) => paths::human_bytes(bytes),
+            (false, _) => format!("~{}", paths::human_bytes(bytes)),
+        };
         let meta = format!(
             "{} {}   ·   {} {}   ·   {}",
             t(i18n, Msg::Size),
-            paths::human_bytes(model.approx_bytes),
+            size_text,
             t(i18n, Msg::Files),
             model.source.files().len(),
             model.source.label(),
@@ -331,7 +348,6 @@ fn profile(
 ) {
     scroll(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.add_space(8.0);
 
         // Header -----------------------------------------------------------
         widgets::card(ui, |ui| {
@@ -367,9 +383,9 @@ fn profile(
         });
 
         // Profile picture ---------------------------------------------------
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
         widgets::section(ui, Icon::Image, &data.profile_picture);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         widgets::card(ui, |ui| {
             ui.label(RichText::new(&data.profile_picture_hint).size(12.5).color(theme::TEXT_FAINT));
             ui.add_space(12.0);
@@ -394,9 +410,9 @@ fn profile(
         });
 
         // Connections -------------------------------------------------------
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
         widgets::section(ui, Icon::Link, &data.connections_label);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         widgets::card(ui, |ui| {
             ui.label(RichText::new(&data.connections_hint).size(12.5).color(theme::TEXT_FAINT));
             ui.add_space(12.0);
@@ -425,9 +441,9 @@ fn profile(
         });
 
         // Hugging Face token ------------------------------------------------
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
         widgets::section(ui, Icon::KeyRound, &data.hf_token);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         let stored_label = match (&data.hf_token_stored, &data.hf_token_stored_at) {
             (true, Some(at)) => data.token_stored_at.replace("{date}", at),
             (true, None) => data.token_stored.clone(),
@@ -467,7 +483,7 @@ fn profile(
                 *action = Some(AccountAction::SignOut);
             }
         });
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
     });
 }
 
@@ -483,10 +499,9 @@ fn view_settings(
 
     scroll(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.add_space(8.0);
 
         widgets::section(ui, Icon::Volume2, &data.audio);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         widgets::card(ui, |ui| {
             ui.label(RichText::new(&data.audio_hint).size(12.5).color(theme::TEXT_FAINT));
             ui.add_space(12.0);
@@ -520,18 +535,18 @@ fn view_settings(
             );
         });
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
         widgets::section(ui, Icon::Languages, &data.language);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         widgets::card(ui, |ui| {
             ui.label(RichText::new(&data.language_hint).size(12.5).color(theme::TEXT_FAINT));
             ui.add_space(10.0);
             language_combo(ui, "software_language", &mut language);
         });
 
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
         widgets::section(ui, Icon::Info, &data.about);
-        ui.add_space(8.0);
+        ui.add_space(theme::space::MD);
         widgets::card(ui, |ui| {
             widgets::key_value(ui, &data.version_label, version::VERSION);
             widgets::key_value(ui, &data.build_label, &data.build);
@@ -540,7 +555,7 @@ fn view_settings(
             ui.add_space(10.0);
             let _ = ui.hyperlink_to(data.api.clone(), data.api.clone());
         });
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
     });
 
     let mut dirty = false;
@@ -565,12 +580,19 @@ fn view_plugins(ui: &mut Ui, data: &PluginsView) -> Option<PluginsAction> {
     let mut action = None;
     scroll(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.add_space(8.0);
+
+        // A summary line, so the page answers "what is installed and what is
+        // on" before the list starts. There was no count anywhere before.
+        ui.label(RichText::new(&data.summary).size(13.0).color(theme::TEXT_NORMAL));
+        ui.add_space(theme::space::XS);
         ui.label(RichText::new(&data.hint).size(12.5).color(theme::TEXT_FAINT));
-        ui.add_space(12.0);
+        ui.add_space(theme::SECTION_GAP);
 
         if data.plugins.is_empty() {
-            ui.label(RichText::new(&data.empty).size(13.0).color(theme::TEXT_MUTED));
+            widgets::card(ui, |ui| {
+                ui.label(RichText::new(&data.empty).size(13.0).color(theme::TEXT_MUTED));
+            });
+            return;
         }
 
         for (index, plugin) in data.plugins.iter().enumerate() {
@@ -580,8 +602,8 @@ fn view_plugins(ui: &mut Ui, data: &PluginsView) -> Option<PluginsAction> {
             // Reserve the controls up front. Giving the text column all of the
             // remaining width instead pushes the switch off the card edge.
             let controls = widgets::SWITCH_WIDTH
-                + if imported { widgets::ICON_BUTTON_WIDTH + 8.0 } else { 0.0 }
-                + 8.0;
+                + if imported { widgets::ICON_BUTTON_WIDTH + theme::space::SM } else { 0.0 }
+                + theme::space::SM;
 
             widgets::card(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -625,7 +647,7 @@ fn view_plugins(ui: &mut Ui, data: &PluginsView) -> Option<PluginsAction> {
                 });
             });
         }
-        ui.add_space(16.0);
+        ui.add_space(theme::SECTION_GAP);
     });
     action
 }

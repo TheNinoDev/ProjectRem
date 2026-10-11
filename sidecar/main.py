@@ -21,12 +21,24 @@ import argparse
 import json
 import platform
 import shutil
+import struct
 import sys
 import traceback
+import wave
+from pathlib import Path
 from typing import Any
 
 VERSION = "0.0.0"
 PROTOCOL = 1
+
+# Recording format. 16 kHz mono is what Whisper wants, so that is what we
+# capture: recording at 48 kHz would only add a resampling step later.
+SAMPLE_RATE = 16000
+CHANNELS = 1
+SAMPLE_WIDTH = 2  # bytes, i.e. signed 16-bit PCM
+
+# A recording longer than this is almost certainly a stuck button.
+MAX_RECORD_SECONDS = 300
 
 
 def log(message: str) -> None:
@@ -63,6 +75,110 @@ def _devices_via_sounddevice() -> tuple[list[dict[str, Any]], list[dict[str, Any
         if outputs_count > 0:
             outputs.append(dict(entry, channels=outputs_count))
     return inputs, outputs
+
+
+# ---------------------------------------------------------------- recording
+
+
+def _resolve_input_index(device_id: str | None) -> int | None:
+    """Map an `audio_devices` id onto a backend device index.
+
+    Device ids look like `sd:3:Realtek High Definition Audio`; the `sd` /
+    `pa` prefix says which backend produced it, which matters because the two
+    backends enumerate independently.
+    """
+    if not device_id:
+        return None
+    try:
+        backend, raw_index, _name = device_id.split(":", 2)
+        index = int(raw_index)
+    except (ValueError, AttributeError):
+        return None
+    return index if backend in ("sd", "pa") else None
+
+
+def record_audio(device_id: str | None, destination: Path, max_seconds: float) -> dict[str, Any]:
+    """Record from a microphone until interrupted, writing a WAV file.
+
+    Uses `sounddevice`'s blocking recorder, which runs on this thread. That is
+    safe because the GUI drives start/stop with separate requests and the
+    recorder is interrupted between blocks - but it does mean the sidecar cannot
+    answer other requests while recording. The GUI knows this and shows the
+    recording as a modal state.
+    """
+    import sounddevice  # type: ignore
+
+    index = _resolve_input_index(device_id)
+    if device_id and index is None:
+        return {"ok": False, "error": f"cannot resolve input device {device_id!r}"}
+
+    seconds = max(0.1, min(float(max_seconds), MAX_RECORD_SECONDS))
+    frames = int(SAMPLE_RATE * seconds)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # `InputStream` rather than `sounddevice.rec`: `rec` returns the samples
+    # directly and there is no way to stop it early, so a cancelled recording
+    # would still block for the full duration.
+    stream = None
+    try:
+        stream = sounddevice.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype="int16",
+            device=index,
+            blocksize=1024,
+        )
+        stream.start()
+        chunks: list[bytes] = []
+        collected = 0
+        while collected < frames:
+            block, overflowed = stream.read(min(1024, frames - collected))
+            if overflowed:
+                # The GUI could not drain us fast enough; drop what was lost
+                # rather than splicing it into the middle of the audio.
+                log("input overflow, dropped a block")
+            chunks.append(bytes(block))
+            collected += len(block)
+    except Exception as err:  # noqa: BLE001 - surfaced to the GUI verbatim
+        return {"ok": False, "error": f"recording failed: {err}"}
+    finally:
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:  # noqa: BLE001 - closing must never mask the real error
+                pass
+
+    data = b"".join(chunks)
+    # An interrupted recording can come back short or empty; a zero-byte WAV is
+    # worse than a clear error, because the next stage would have nothing to say.
+    if not data:
+        return {"ok": False, "error": "no audio was captured"}
+
+    with wave.open(str(destination), "wb") as handle:
+        handle.setnchannels(CHANNELS)
+        handle.setsampwidth(SAMPLE_WIDTH)
+        handle.setframerate(SAMPLE_RATE)
+        handle.writeframes(data)
+
+    return {
+        "ok": True,
+        "path": str(destination),
+        "sample_rate": SAMPLE_RATE,
+        "channels": CHANNELS,
+        "bytes": len(data),
+        "seconds": round(len(data) / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH), 3),
+    }
+
+
+def read_wav_duration(path: Path) -> float:
+    """Duration of a WAV file in seconds, or 0.0 if it cannot be read."""
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate() or 1
+            return handle.getnframes() / rate
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return 0.0
 
 
 def _devices_via_pyaudio() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -119,6 +235,23 @@ def handle(request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     if command == "audio_devices":
         result = audio_devices()
         return ({"ok": True, **result}, False)
+
+    if command == "record":
+        destination = Path(str(request.get("path") or ""))
+        if not str(destination):
+            return ({"ok": False, "error": "record needs a destination path"}, False)
+        result = record_audio(
+            request.get("device"),
+            destination,
+            float(request.get("max_seconds") or MAX_RECORD_SECONDS),
+        )
+        return (result, False)
+
+    if command == "wav_info":
+        path = Path(str(request.get("path") or ""))
+        if not str(path) or not path.is_file():
+            return ({"ok": False, "error": "no such file"}, False)
+        return ({"ok": True, "seconds": read_wav_duration(path)}, False)
 
     if command == "info":
         return (

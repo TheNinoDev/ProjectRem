@@ -51,6 +51,10 @@ pub enum Origin {
 }
 
 /// The three mock plugins that always exist.
+///
+/// Alphabetical by name, because the Plugins page relies on that: it sorts
+/// everything into one list, and the built-ins should not shuffle around when
+/// an import order changes.
 pub fn builtin_plugins() -> Vec<Plugin> {
     vec![
         Plugin {
@@ -93,6 +97,17 @@ impl Plugin {
     /// Stable key used to persist the enabled flag.
     pub fn key(&self) -> String {
         format!("{}@{}", self.manifest.name, self.manifest.version)
+    }
+
+    /// Sort key: imported plugins first (they are the ones the user added),
+    /// then case-insensitive by name. Ties break on version so the order is
+    /// total and the list never reshuffles between frames.
+    pub fn sort_key(&self) -> (u8, String, String) {
+        let group = match self.origin {
+            Origin::Imported => 0,
+            Origin::BuiltIn => 1,
+        };
+        (group, self.manifest.name.to_lowercase(), self.manifest.version.clone())
     }
 }
 

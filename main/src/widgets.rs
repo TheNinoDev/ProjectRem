@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, TextStyle,
+    Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, TextStyle,
     Ui, Vec2,
 };
 
@@ -152,14 +152,18 @@ pub fn fallback_avatar(ui: &mut Ui, rect: Rect, color: Color32) {
 // ------------------------------------------------------------- containers
 
 /// A padded surface with a hairline border - the app's basic grouping element.
+///
+/// `take_available_space` rather than `set_width`: a `Frame` sizes itself to
+/// its content, so without this a card collapses to whatever its widest line
+/// happens to be and the page ends up ragged.
 pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::BG_CARD)
         .corner_radius(CornerRadius::same(RADIUS))
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .inner_margin(Margin::same(16))
+        .inner_margin(egui::epaint::MarginF32::same(theme::CARD_PADDING))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.take_available_space();
             add(ui);
         });
 }
@@ -169,7 +173,7 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) {
     egui::Frame::new()
         .fill(color.gamma_multiply(0.16))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(6, 2))
+        .inner_margin(egui::epaint::MarginF32::symmetric(theme::space::SM, theme::space::XS / 2.0))
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(10.5).strong().color(color));
         });
@@ -184,7 +188,7 @@ pub fn section(ui: &mut Ui, icon: Icon, title: &str) {
         ui.add_space(2.0);
         ui.label(RichText::new(title).size(13.5).strong().color(theme::TEXT_STRONG));
     });
-    ui.add_space(6.0);
+    ui.add_space(theme::space::SM);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, theme::BORDER));
 }
@@ -394,22 +398,6 @@ pub fn key_value(ui: &mut Ui, key: &str, value: &str) {
     });
 }
 
-/// A dot + label + value row for the status list.
-pub fn status_row(ui: &mut Ui, label: &str, value: &str, ok: bool) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [180.0, 22.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(theme::TEXT_MUTED)).truncate(),
-        );
-        ui.painter().circle_filled(
-            ui.next_widget_position() + Vec2::new(4.0, 7.0),
-            3.5,
-            if ok { theme::SUCCESS } else { theme::TEXT_FAINT },
-        );
-        ui.add_space(10.0);
-        ui.label(RichText::new(value).size(13.0).color(theme::TEXT_NORMAL));
-    });
-}
 
 /// One avatar option in the profile-picture picker.
 pub fn avatar_choice(

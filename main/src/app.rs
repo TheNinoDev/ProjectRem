@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 
 use crate::account::{self, AccountState, Api, Provider};
@@ -28,11 +28,12 @@ use crate::plugins::{self, Origin, Plugin};
 use crate::settings::{Settings, SYSTEM_DEFAULT};
 use crate::sidecar::{AudioDevices, DeviceInfo, Sidecar, Status as SidecarStatus};
 use crate::{paths, theme, version, widgets};
+use crate::theme::NAV_ROW_HEIGHT;
 
 /// Translation lookup. `I18n` is `Copy`, so this works inside closures.
 type Tr = fn(I18n, Msg) -> &'static str;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Main,
     Models,
@@ -282,10 +283,80 @@ impl AccountWorker {
         let _ = self.tx.send(job);
     }
 
+    /// A worker whose channels are closed, so no thread is spawned. Jobs sent to
+    /// it are dropped, which is exactly right for a layout test.
+    #[cfg(test)]
+    fn for_test() -> Self {
+        let (tx, job_rx) = std::sync::mpsc::channel::<AccountJob>();
+        drop(job_rx);
+        let (reply_tx, rx) = std::sync::mpsc::channel::<AccountReply>();
+        drop(reply_tx);
+        Self { tx, rx }
+    }
+
     fn poll(&self) -> Option<AccountReply> {
         self.rx.try_recv().ok()
     }
 }
+
+/// Background fetcher for the real model sizes.
+///
+/// Sizes are only cosmetic, so a failure is deliberately silent: the card falls
+/// back to the catalog's `approx_bytes` and nothing is reported to the user.
+struct SizeWorker {
+    rx: std::sync::mpsc::Receiver<models::sizes::Sizes>,
+}
+
+impl SizeWorker {
+    fn new(catalog: Vec<ModelDef>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job_catalog = catalog.clone();
+        std::thread::Builder::new()
+            .name("projectrem-model-sizes".into())
+            .spawn(move || {
+                // Retried once with the user's token, because the anonymous
+                // Hugging Face rate limit can refuse the tree request.
+                let timeout = Duration::from_secs(20);
+                match models::sizes::fetch(&job_catalog, None, timeout) {
+                    Ok(sizes) if !sizes.is_empty() => {
+                        let _ = tx.send(sizes);
+                        return;
+                    }
+                    _ => {}
+                }
+                match models::sizes::fetch(
+                    &job_catalog,
+                    SIZES_TOKEN.read().ok().and_then(|t| t.clone()).as_deref(),
+                    timeout,
+                ) {
+                    Ok(sizes) if !sizes.is_empty() => {
+                        let _ = tx.send(sizes);
+                    }
+                    Ok(_) => eprintln!("[models] no sizes returned"),
+                    Err(err) => eprintln!("[models] could not fetch real sizes: {err}"),
+                }
+            })
+            .ok();
+        Self { rx }
+    }
+
+    fn poll(&self) -> Option<models::sizes::Sizes> {
+        self.rx.try_recv().ok()
+    }
+
+    /// A worker that never produces anything, so tests do not reach the
+    /// network.
+    #[cfg(test)]
+    fn for_test() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        Self { rx }
+    }
+}
+
+/// The saved Hugging Face token, shared with the size fetcher so it can retry an
+/// anonymous request as an authenticated one.
+static SIZES_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 fn refresh(api: &Api, state: &mut AccountState) {
     let Some(token) = state.token.clone() else { return };
@@ -298,6 +369,15 @@ fn refresh(api: &Api, state: &mut AccountState) {
     if let Ok(status) = api.token_status(&token, Provider::Huggingface) {
         state.hf_token_stored = status.stored;
         state.hf_token_stored_at = status.created_at;
+        // Only refetch the secret when one exists, so an anonymous download
+        // queue does not hammer the server on every refresh.
+        if status.stored {
+            if let Ok(Some(download_token)) = api.download_token(&token) {
+                state.hf_download_token = Some(download_token);
+            }
+        } else {
+            state.hf_download_token = None;
+        }
     }
 }
 
@@ -329,9 +409,14 @@ pub struct ProjectRemApp {
     oauth_replies: Option<std::sync::mpsc::Receiver<Callback>>,
     oauth_busy: bool,
     hf_token_input: String,
+    /// Mirrors account.hf_download_token, so a change is easy to spot.
+    hf_download_token: Option<String>,
 
     catalog: Vec<ModelDef>,
     downloads: HashMap<String, DownloadState>,
+    /// Real sizes from Hugging Face; absent entries fall back to the catalog.
+    sizes: models::sizes::Sizes,
+    size_worker: SizeWorker,
 
     devices: AudioDevices,
     devices_requested: bool,
@@ -342,6 +427,15 @@ pub struct ProjectRemApp {
     sidecar: Sidecar,
     downloader: Downloader,
     toast: Option<Toast>,
+
+    /// Geometry recorded during layout so the headless tests can assert on it.
+    /// Only populated under `cfg(test)`.
+    #[cfg(test)]
+    nav_rects: HashMap<Tab, Rect>,
+    #[cfg(test)]
+    last_pointer: egui::Pos2,
+    #[cfg(test)]
+    page_rect: Rect,
 }
 
 impl ProjectRemApp {
@@ -349,6 +443,7 @@ impl ProjectRemApp {
         let settings = Settings::load();
         let tab = settings.last_tab.as_deref().and_then(Tab::from_slug).unwrap_or(Tab::Main);
         let plugins = load_plugins_with_state(&settings.enabled_plugins);
+        let catalog = models::catalog();
 
         crate::fonts::install(&cc.egui_ctx);
         cc.egui_ctx.set_global_style(theme::style());
@@ -372,7 +467,10 @@ impl ProjectRemApp {
             oauth_replies: None,
             oauth_busy: false,
             hf_token_input: String::new(),
-            catalog: models::catalog(),
+            hf_download_token: None,
+            catalog: catalog.clone(),
+            size_worker: SizeWorker::new(catalog),
+            sizes: models::sizes::Sizes::new(),
             downloads: HashMap::new(),
             devices: AudioDevices::default(),
             devices_requested: true,
@@ -381,11 +479,97 @@ impl ProjectRemApp {
             sidecar,
             downloader: Downloader::new(),
             toast: None,
+            #[cfg(test)]
+            nav_rects: HashMap::new(),
+            #[cfg(test)]
+            last_pointer: egui::Pos2::ZERO,
+            #[cfg(test)]
+            page_rect: Rect::ZERO,
         }
     }
 
     fn t(&self, msg: Msg) -> &'static str {
         self.i18n.t(msg)
+    }
+
+    // ------------------------------------------------------- test support
+    //
+    // The headless tests in `ui_tests.rs` need a headless app and a way to read
+    // back geometry. These hooks exist only under `cfg(test)`, so they cost the
+    // shipped binary nothing.
+
+    /// Build an app without starting the sidecar or the account worker, which
+    /// would otherwise spawn processes and sockets during a test run.
+    #[cfg(test)]
+    pub(crate) fn for_test(ctx: &egui::Context) -> Self {
+        crate::fonts::install(ctx);
+        ctx.set_global_style(theme::style());
+        ctx.set_theme(egui::Theme::Dark);
+        // No size fetch in tests: it would hit the network from `cargo test`.
+        let catalog = models::catalog();
+        Self {
+            i18n: I18n::new(Language::English),
+            settings: Settings::default(),
+            tab: Tab::Main,
+            account: AccountState::default(),
+            account_worker: AccountWorker::for_test(),
+            auth_mode: AuthMode::Login,
+            username: String::new(),
+            password: String::new(),
+            show_password: false,
+            account_busy: false,
+            callback_server: None,
+            oauth_replies: None,
+            oauth_busy: false,
+            hf_token_input: String::new(),
+            hf_download_token: None,
+            catalog: catalog.clone(),
+            // A worker whose channel is closed: no thread, no network.
+            size_worker: SizeWorker::for_test(),
+            sizes: models::sizes::Sizes::new(),
+            downloads: HashMap::new(),
+            devices: AudioDevices::default(),
+            devices_requested: false,
+            plugins: load_plugins_with_state(&Default::default()),
+            avatars: widgets::AvatarCache::new(),
+            sidecar: Sidecar::empty(),
+            downloader: Downloader::new(),
+            toast: None,
+            nav_rects: Default::default(),
+            last_pointer: egui::Pos2::ZERO,
+            page_rect: Rect::ZERO,
+        }
+    }
+
+    /// Render one frame. Thin wrapper so the tests do not need `eframe::Frame`.
+    #[cfg(test)]
+    pub(crate) fn draw_frame(&mut self, ui: &mut egui::Ui) {
+        self.render(ui);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab_for_test(&self) -> Tab {
+        self.tab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_tab_for_test(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nav_rect(&self, tab: Tab) -> Option<Rect> {
+        self.nav_rects.get(&tab).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nav_hovered_for_test(&self, tab: Tab) -> bool {
+        self.nav_rects.get(&tab).is_some_and(|r| r.contains(self.last_pointer))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_rect_for_test(&self) -> Rect {
+        self.page_rect
     }
 
     fn toast(&mut self, text: impl Into<String>, color: Color32) {
@@ -395,8 +579,9 @@ impl ProjectRemApp {
 
     // ------------------------------------------------------------- frame
 
-    fn render(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn render(&mut self, ui: &mut Ui) {
         self.avatars.poll(ui.ctx());
+        self.pump_sizes();
         self.pump_downloads();
         self.pump_account();
         self.pump_sidecar();
@@ -431,6 +616,11 @@ impl ProjectRemApp {
         }
 
         // Whatever is left over is the page body.
+        #[cfg(test)]
+        {
+            self.last_pointer = ui.input(|i| i.pointer.hover_pos().unwrap_or_default());
+            self.page_rect = ui.available_rect_before_wrap();
+        }
         self.page(ui);
         self.draw_toast(ui);
     }
@@ -440,7 +630,7 @@ impl ProjectRemApp {
         let t: Tr = I18n::t;
         egui::Frame::new()
             .fill(theme::BG_HEADER)
-            .inner_margin(Margin::symmetric(24, 13))
+            .inner_margin(egui::epaint::MarginF32::symmetric(theme::PAGE_PADDING, theme::space::MD))
             .show(ui, |ui| {
                 // A `Frame` sizes itself to its content, so the width has to be
                 // claimed from inside the frame for the header to span the page.
@@ -468,7 +658,7 @@ impl ProjectRemApp {
 
         egui::Frame::new()
             .fill(theme::BG_SIDEBAR)
-            .inner_margin(Margin::symmetric(14, 16))
+            .inner_margin(egui::epaint::MarginF32::symmetric(theme::space::MD, theme::space::LG))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(t(i18n, Msg::AppName)).size(16.0).strong().color(theme::TEXT_STRONG));
@@ -479,11 +669,17 @@ impl ProjectRemApp {
         // The nav rows are inset so the active pill does not touch the window
         // edge and the accent bar has somewhere to sit.
         egui::Frame::new()
-            .inner_margin(Margin::symmetric(10, 0))
+            .inner_margin(egui::epaint::MarginF32::symmetric(theme::space::MD, 0.0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for tab in Tab::ALL {
-                    picked = nav_item(ui, tab, self.tab == tab, t(i18n, tab.name()));
+                    let (clicked, _rect) =
+                        nav_item(ui, tab, self.tab == tab, t(i18n, tab.name()));
+                    if clicked.is_some() {
+                        picked = clicked;
+                    }
+                    #[cfg(test)]
+                    self.nav_rects.insert(tab, _rect);
                 }
             });
         if let Some(tab) = picked {
@@ -632,28 +828,7 @@ impl ProjectRemApp {
             title: t(i18n, Msg::WelcomeTitle),
             body: t(i18n, Msg::WelcomeBody),
             stamp: version::build_stamp(),
-            status_label: t(i18n, Msg::Status),
-            rows: self.status_rows(i18n),
         }
-    }
-
-    fn status_rows(&self, i18n: I18n) -> Vec<(String, String, bool)> {
-        let t: Tr = I18n::t;
-        let ready = self.catalog.iter().filter(|m| m.downloaded()).count();
-        vec![
-            (t(i18n, Msg::Version).to_owned(), version::VERSION.to_owned(), true),
-            (t(i18n, Msg::Backend).to_owned(), account::base_url(), true),
-            (
-                t(i18n, Msg::PythonSidecar).to_owned(),
-                self.sidecar_status_text(i18n).to_owned(),
-                self.sidecar.status() == SidecarStatus::Running,
-            ),
-            (
-                t(i18n, Msg::Models).to_owned(),
-                format!("{ready} / {}", self.catalog.len()),
-                ready == self.catalog.len(),
-            ),
-        ]
     }
 
     fn models_data(&self) -> ModelsView {
@@ -668,7 +843,11 @@ impl ProjectRemApp {
                         self.downloads.get(&model.id).cloned().unwrap_or(DownloadState::Missing)
                     };
                     let missing = model.source.missing_count(&model.id);
-                    (model.clone(), state, missing)
+                    // `None` until the size worker has an answer; the card
+                    // labels the fallback with a `~` so it is never mistaken
+                    // for the real figure.
+                    let size = self.sizes.get(&model.id).copied();
+                    (model.clone(), state, missing, size)
                 })
                 .collect(),
         }
@@ -753,8 +932,19 @@ impl ProjectRemApp {
 
     fn plugins_data(&self, i18n: I18n) -> PluginsView {
         let t: Tr = I18n::t;
+
+        // Sorted here rather than in the view, so the order is decided once and
+        // the action indices the view hands back refer to this exact order.
+        let mut plugins = self.plugins.clone();
+        plugins.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+
+        let total = plugins.len();
+        let on = plugins.iter().filter(|p| p.enabled).count();
         PluginsView {
-            plugins: self.plugins.clone(),
+            summary: self
+                .i18n
+                .fill(Msg::PluginsSummary, &[("on", &on.to_string()), ("total", &total.to_string())]),
+            plugins,
             hint: t(i18n, Msg::PluginsHint).to_owned(),
             empty: t(i18n, Msg::NoPlugins).to_owned(),
             remove: t(i18n, Msg::Remove).to_owned(),
@@ -787,7 +977,7 @@ impl ProjectRemApp {
 
         egui::Frame::new()
             .fill(theme::BG_CARD)
-            .inner_margin(Margin::symmetric(24, 14))
+            .inner_margin(egui::epaint::MarginF32::symmetric(theme::PAGE_PADDING, theme::space::MD + 2.0))
             .show(ui, |ui| {
                 // See `header`: the frame only spans the page if its content
                 // claims the full width.
@@ -1031,6 +1221,17 @@ impl ProjectRemApp {
         while let Some(reply) = self.account_worker.poll() {
             match reply {
                 AccountReply::Refreshed(state) => {
+                    // Keep the downloader in step with the account's token, so
+                    // a newly saved token takes effect on the next download
+                    // without restarting the app.
+                    let token = state.hf_download_token.clone();
+                    if token != self.hf_download_token {
+                        self.downloader.set_token(token.clone());
+                        self.hf_download_token = token.clone();
+                        if let Ok(mut slot) = SIZES_TOKEN.write() {
+                            *slot = token;
+                        }
+                    }
                     self.account = state;
                     self.account_busy = false;
                 }
@@ -1049,6 +1250,11 @@ impl ProjectRemApp {
                 }
             }
         }
+    }
+
+    fn pump_sizes(&mut self) {
+        let Some(sizes) = self.size_worker.poll() else { return };
+        self.sizes = sizes;
     }
 
     fn pump_downloads(&mut self) {
@@ -1107,15 +1313,6 @@ impl ProjectRemApp {
         }
     }
 
-    fn sidecar_status_text(&self, i18n: I18n) -> &'static str {
-        let t: Tr = I18n::t;
-        match self.sidecar.status() {
-            SidecarStatus::Running => t(i18n, Msg::Running),
-            SidecarStatus::Starting => t(i18n, Msg::Starting),
-            SidecarStatus::Stopped => t(i18n, Msg::Stopped),
-            SidecarStatus::Failed => t(i18n, Msg::Unavailable),
-        }
-    }
 
     fn draw_toast(&mut self, ui: &mut Ui) {
         if self.toast.as_ref().is_none_or(|t| Instant::now() >= t.until) {
@@ -1133,13 +1330,14 @@ impl ProjectRemApp {
                 egui::Frame::new()
                     .fill(theme::BG_CARD)
                     .corner_radius(CornerRadius::same(8))
-                    .inner_margin(Margin::symmetric(14, 10))
+                    .inner_margin(egui::epaint::MarginF32::symmetric(theme::space::MD, theme::space::SM))
                     .stroke(Stroke::new(1.0, color))
                     .show(ui, |ui| {
                         ui.label(RichText::new(text.clone()).size(13.0).color(theme::TEXT_STRONG));
                     });
             });
     }
+
 
 
     fn shutdown(&mut self) {
@@ -1149,8 +1347,8 @@ impl ProjectRemApp {
 }
 
 impl eframe::App for ProjectRemApp {
-    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        self.render(ui, frame);
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1177,12 +1375,14 @@ pub struct MainView<'a> {
     title: &'a str,
     body: &'a str,
     stamp: String,
-    status_label: &'a str,
-    rows: Vec<(String, String, bool)>,
 }
 
 pub struct ModelsView {
-    models: Vec<(ModelDef, DownloadState, usize)>,
+    /// `(definition, download state, files still missing, real size in bytes)`.
+    ///
+    /// The size is `None` until the Hugging Face API answers; the card then
+    /// falls back to the catalog's approximate figure.
+    pub models: Vec<(ModelDef, DownloadState, usize, Option<u64>)>,
 }
 
 pub struct AccountView {
@@ -1251,6 +1451,7 @@ pub struct SettingsView {
 
 pub struct PluginsView {
     plugins: Vec<Plugin>,
+    summary: String,
     hint: String,
     empty: String,
     remove: String,
@@ -1266,18 +1467,39 @@ include!("views.rs");
 
 // ------------------------------------------------------------------- helpers
 
-/// A full-height vertical scroll area.
+/// The page body: a scroll area with the app's standard gutter, whose content
+/// is capped at [`theme::CONTENT_MAX_WIDTH`] and centred.
+///
+/// Every page goes through this, which is what makes the padding identical on
+/// all five. The width cap matters: without it a maximised window stretches
+/// each card to 1500 px and the page falls apart.
 fn scroll(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::ScrollArea::vertical()
+        .id_salt("page")
         .auto_shrink([false, false])
         .max_height(ui.available_height())
-        .show(ui, add);
+        .show(ui, |ui| {
+            let available = ui.available_width().max(0.0);
+            let content = available.min(theme::CONTENT_MAX_WIDTH);
+            let gutter = (available - content) / 2.0;
+            ui.horizontal(|ui| {
+                ui.add_space(gutter);
+                ui.vertical(|ui| {
+                    ui.set_width(content);
+                    add(ui);
+                });
+            });
+        });
 }
 
-fn nav_item(ui: &mut Ui, tab: Tab, selected: bool, label: &str) -> Option<Tab> {
+/// One sidebar navigation row.
+///
+/// Returns `Some(tab)` when it was clicked, plus the row's rect so the headless
+/// tests can find it.
+fn nav_item(ui: &mut Ui, tab: Tab, selected: bool, label: &str) -> (Option<Tab>, Rect) {
     let color = if selected { theme::TEXT_STRONG } else { theme::TEXT_MUTED };
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), NAV_ROW_HEIGHT), Sense::click());
 
     if selected {
         ui.painter().rect_filled(rect, CornerRadius::same(8), theme::BG_SIDEBAR_ITEM_ACTIVE);
@@ -1310,11 +1532,8 @@ fn nav_item(ui: &mut Ui, tab: Tab, selected: bool, label: &str) -> Option<Tab> {
 
     let clicked = response.clicked();
     response.on_hover_text(label);
-    if clicked && !selected {
-        Some(tab)
-    } else {
-        None
-    }
+    let out = if clicked && !selected { Some(tab) } else { None };
+    (out, rect)
 }
 
 fn open_in_file_manager(path: &std::path::Path) {

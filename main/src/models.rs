@@ -104,7 +104,9 @@ pub struct ModelDef {
     pub description: String,
     /// Human facing repository / documentation link.
     pub repo_url: String,
-    /// Approximate download size in bytes, for display before downloading.
+    /// Fallback download size in bytes, used until the real one has been
+    /// fetched from Hugging Face. Never shown as exact - see
+    /// [`crate::models::sizes::fetch`].
     pub approx_bytes: u64,
     pub source: ModelSource,
 }
@@ -132,7 +134,7 @@ pub fn catalog() -> Vec<ModelDef> {
             name: "Qwen3.5 2B (GGUF)".into(),
             description: "Local language model, 4-bit quantised.".into(),
             repo_url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF".into(),
-            approx_bytes: 1_280_000_000,
+            approx_bytes: 1_280_000_000, // real: 1_281_302_528
             source: ModelSource::HuggingFace {
                 repo: "unsloth/Qwen3.5-2B-GGUF".into(),
                 revision: "main".into(),
@@ -145,12 +147,14 @@ pub fn catalog() -> Vec<ModelDef> {
             name: "Kitten TTS 2".into(),
             description: "Local text-to-speech with voice samples.".into(),
             repo_url: "https://huggingface.co/KittenML/kitten-tts-2".into(),
-            approx_bytes: 573_000_000,
+            approx_bytes: 1_602_623_375, // real, measured: was 573 MB (-64%)
             source: ModelSource::HuggingFace {
                 repo: "KittenML/kitten-tts-2".into(),
                 revision: "main".into(),
                 files: vec![
-                    "cpp/default/model-tq2_1.gguf".into(),
+                    // Not `cpp/default/...`: the weights sit one level up. The
+                    // old path 404'd, which is how this was found.
+                    "cpp/model-tq2_1.gguf".into(),
                     "cpp/default/decoder.pt".into(),
                     "cpp/default/voices.json".into(),
                 ],
@@ -162,7 +166,7 @@ pub fn catalog() -> Vec<ModelDef> {
             name: "Whisper large-v3 turbo".into(),
             description: "Local speech-to-text (openai/whisper-large-v3, turbo).".into(),
             repo_url: "https://huggingface.co/openai/whisper-large-v3-turbo".into(),
-            approx_bytes: 1_621_000_000,
+            approx_bytes: 1_621_000_000, // real: 1_619_854_052
             source: ModelSource::HuggingFace {
                 repo: "openai/whisper-large-v3-turbo".into(),
                 revision: "main".into(),
@@ -181,6 +185,124 @@ pub fn catalog() -> Vec<ModelDef> {
 /// Build a direct download URL for one file of a Hugging Face repo.
 pub fn hf_url(repo: &str, revision: &str, file: &str) -> String {
     format!("{HF_ENDPOINT}/{repo}/resolve/{revision}/{file}")
+}
+
+/// Real download sizes, fetched from the Hugging Face API.
+///
+/// `approx_bytes` in the catalog was a hand-written guess, and the guess was
+/// wrong often enough to be misleading ("Size 1.19 GB" for a 1.22 GB file).
+/// The tree endpoint reports the true size of every file, so the number on the
+/// card can be exact instead of approximately fictional.
+pub mod sizes {
+    use super::{ModelDef, ModelSource, HF_ENDPOINT};
+    use std::collections::HashMap;
+
+    /// `model id -> total bytes`.
+    pub type Sizes = HashMap<String, u64>;
+
+    /// Fetch the real size of every Hugging Face model in `catalog`.
+    ///
+    /// Blocking, so this belongs on a worker thread. A repo that cannot be
+    /// reached is simply left out of the map, and the UI keeps showing the
+    /// catalog's fallback - a wrong-looking number is better than an error
+    /// dialog on the Models page.
+    pub fn fetch(
+        catalog: &[ModelDef],
+        token: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Result<Sizes, String> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(concat!("ProjectRem/", env!("PROJECTREM_VERSION")))
+            .timeout(timeout)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Sizes::new();
+        let mut first_error: Option<String> = None;
+
+        for model in catalog {
+            let ModelSource::HuggingFace { repo, files, .. } = &model.source else {
+                continue;
+            };
+            match repo_size(&client, repo, files, token) {
+                Ok(total) => {
+                    out.insert(model.id.clone(), total);
+                }
+                Err(err) => {
+                    // Remember the first failure but keep going: one broken repo
+                    // should not blank out the sizes of the others.
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
+
+        match (out.is_empty(), first_error) {
+            (false, _) => Ok(out),
+            (true, Some(err)) => Err(err),
+            (true, None) => Ok(out),
+        }
+    }
+
+    fn repo_size(
+        client: &reqwest::blocking::Client,
+        repo: &str,
+        wanted: &[String],
+        token: Option<&str>,
+    ) -> Result<u64, String> {
+        let url = format!("{HF_ENDPOINT}/api/models/{repo}/tree/main?recursive=true");
+        let request = client.get(&url);
+        let request = match token {
+            Some(value) => request.bearer_auth(value),
+            None => request,
+        };
+        let response = request.send().map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("HTTP {} for {repo}", response.status()));
+        }
+        let body: serde_json::Value = response.json().map_err(|e| e.to_string())?;
+
+        // The tree is a list of entries; only the files this model actually
+        // downloads are counted, so an extra README in the repo does not inflate
+        // the number.
+        let mut total = 0u64;
+        let mut found = 0usize;
+        for entry in body.as_array().into_iter().flatten() {
+            if entry.get("type").and_then(|t| t.as_str()) != Some("file") {
+                continue;
+            }
+            let Some(path) = entry.get("path").and_then(|p| p.as_str()) else { continue };
+            if !wanted.iter().any(|name| name == path) {
+                continue;
+            }
+            if let Some(size) = entry.get("size").and_then(|s| s.as_u64()) {
+                total += size;
+                found += 1;
+            }
+        }
+
+        (found > 0).then_some(total).ok_or_else(|| format!("no sizes for {repo}"))
+    }
+
+    /// Sum the `size` fields of a tree response.
+    ///
+    /// Split out so the parsing can be tested without a network round trip.
+    #[cfg(test)]
+    pub fn sum_tree(body: &serde_json::Value, wanted: &[String]) -> Option<u64> {
+        let mut total = 0u64;
+        let mut found = 0usize;
+        for entry in body.as_array()? {
+            if entry.get("type").and_then(|t| t.as_str()) != Some("file") {
+                continue;
+            }
+            let path = entry.get("path")?.as_str()?;
+            if !wanted.iter().any(|name| name == path) {
+                continue;
+            }
+            total += entry.get("size")?.as_u64()?;
+            found += 1;
+        }
+        (found > 0).then_some(total)
+    }
 }
 
 fn exists(path: &Path) -> bool {
@@ -236,5 +358,94 @@ mod tests {
         assert!(src.files().is_empty());
         assert_eq!(src.missing_count("anything"), 0);
         assert!(src.is_complete("anything"));
+    }
+
+    #[test]
+    fn the_tree_parser_only_counts_the_files_we_download() {
+        let body = serde_json::json!([
+            {"type": "file", "path": "model.safetensors", "size": 100},
+            {"type": "file", "path": "README.md", "size": 900},
+            {"type": "directory", "path": "cpp"},
+            {"type": "file", "path": "config.json", "size": 5}
+        ]);
+        let wanted = vec!["model.safetensors".to_string()];
+        // README and config must not inflate the number.
+        assert_eq!(sizes::sum_tree(&body, &wanted), Some(100));
+
+        let two = vec!["model.safetensors".to_string(), "config.json".to_string()];
+        assert_eq!(sizes::sum_tree(&body, &two), Some(105));
+
+        // A file we do not have is a problem, not a zero.
+        let missing = vec!["nope.gguf".to_string()];
+        assert_eq!(sizes::sum_tree(&body, &missing), None);
+    }
+
+    /// Every file in the catalog must actually exist in its repository.
+    ///
+    /// A wrong path does not fail at build time - it fails much later as a 404
+    /// in the middle of a download, with the user waiting. `KittenML/kitten-tts-2`
+    /// had exactly that problem (`cpp/default/model-tq2_1.gguf` instead of
+    /// `cpp/model-tq2_1.gguf`) until the size fetcher pointed it out.
+    ///
+    /// Network access, so it is `#[ignore]`d and run deliberately:
+    ///     cargo test -- --ignored catalog_files_exist_upstream
+    #[test]
+    #[ignore = "needs network"]
+    fn catalog_files_exist_upstream() {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("ProjectRem catalog check")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("client");
+
+        for model in catalog() {
+            let ModelSource::HuggingFace { repo, files, .. } = &model.source else { continue };
+            let url = format!("{HF_ENDPOINT}/api/models/{repo}/tree/main?recursive=true");
+            let body: serde_json::Value = client
+                .get(&url)
+                .send()
+                .unwrap_or_else(|e| panic!("{repo}: {e}"))
+                .json()
+                .unwrap_or_else(|e| panic!("{repo}: bad JSON: {e}"));
+
+            for file in files {
+                let present = body
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|entry| {
+                        entry.get("type").and_then(|t| t.as_str()) == Some("file")
+                            && entry.get("path").and_then(|p| p.as_str()) == Some(file.as_str())
+                    });
+                assert!(present, "{model_id}: {repo} has no file {file}", model_id = model.id);
+            }
+        }
+    }
+
+    /// The size on the card must not be off by more than 10% once we know the
+    /// real figure - that is what makes the hand-written `approx_bytes`
+    /// fallback tolerable rather than misleading.
+    #[test]
+    #[ignore = "needs network"]
+    fn the_fallback_sizes_are_close_to_reality() {
+        let catalog = catalog();
+        let sizes =
+            sizes::fetch(&catalog, None, std::time::Duration::from_secs(30)).expect("fetch");
+        for model in &catalog {
+            let Some(real) = sizes.get(&model.id) else {
+                eprintln!("skipping {}: no size returned", model.id);
+                continue;
+            };
+            let guess = model.approx_bytes as f64;
+            let ratio = *real as f64 / guess;
+            assert!(
+                (0.9..=1.1).contains(&ratio),
+                "{}: catalog says {} but the real size is {} ({:+.0}%)",
+                model.id,
+                model.approx_bytes,
+                real,
+                (ratio - 1.0) * 100.0
+            );
+        }
     }
 }

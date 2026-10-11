@@ -259,6 +259,27 @@ async function tokenStatus(env, user, provider) {
   });
 }
 
+/**
+ * Hand the stored Hugging Face token back to its owner, for use as a download
+ * `Authorization` header.
+ *
+ * This is deliberately a separate route from `tokenStatus`: that one stays
+ * write-only and safe for any screen, while this one returns a credential and
+ * so is only ever called by the signed-in app on the user's own machine. The
+ * token is their own and the app already runs as them, but keeping the two
+ * apart means a future UI bug that renders token state cannot leak the secret.
+ */
+async function downloadToken(env, user, provider) {
+  if (provider !== "huggingface") {
+    return fail(400, "Only huggingface tokens can be used for downloads.");
+  }
+  const record = await readJson(env.PR, `token:${user.id}:${provider}`);
+  if (!record?.token) {
+    return fail(404, "No huggingface token is stored.");
+  }
+  return json({ ok: true, provider, token: record.token });
+}
+
 async function listBots(env, user) {
   const bots = [];
   const owned = await readJson(env.PR, `bots:${user.id}`);
@@ -509,6 +530,13 @@ export default {
         if (!PROVIDERS.includes(provider)) return fail(400, `Unknown provider "${provider}".`);
         if (method === "PUT") return storeToken(request, env, user, provider);
         if (method === "GET") return tokenStatus(env, user, provider);
+      }
+
+      // Checked before the route above, which would otherwise match
+      // `/api/tokens/huggingface/download` only partially.
+      const downloadRoute = path.match(/^\/api\/tokens\/([a-z]+)\/download$/);
+      if (downloadRoute && method === "GET") {
+        return downloadToken(env, user, downloadRoute[1]);
       }
     } catch (err) {
       return fail(500, err?.message ?? "Internal error");

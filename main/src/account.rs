@@ -127,6 +127,11 @@ pub struct AccountState {
     pub bots: Vec<Bot>,
     pub hf_token_stored: bool,
     pub hf_token_stored_at: Option<String>,
+    /// The saved Hugging Face token, for authenticated downloads.
+    ///
+    /// This is a credential, so it is deliberately never put in any view
+    /// struct - only the boolean above reaches the UI.
+    pub hf_download_token: Option<String>,
 }
 
 impl AccountState {
@@ -310,6 +315,25 @@ impl Api {
 
     pub fn token_status(&self, token: &str, provider: Provider) -> Result<TokenStatus> {
         self.send(self.request(reqwest::Method::GET, &format!("/api/tokens/{}", provider.code()), Some(token)))
+    }
+
+    /// Fetch the stored Hugging Face token for use as a download header.
+    ///
+    /// Returns `Ok(None)` when the user has not saved one - that is the normal
+    /// case, not an error. The token is only ever handed to the authenticated
+    /// owner on their own machine; [`Self::token_status`] stays write-only.
+    pub fn download_token(&self, token: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Reply {
+            #[serde(default)]
+            token: Option<String>,
+        }
+        let reply: Reply = self.send(self.request(
+            reqwest::Method::GET,
+            "/api/tokens/huggingface/download",
+            Some(token),
+        ))?;
+        Ok(reply.token)
     }
 
     pub fn bots(&self, token: &str) -> Result<Vec<Bot>> {

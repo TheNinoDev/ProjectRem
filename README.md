@@ -39,11 +39,11 @@ dependencies the first time and then runs the GUI with `cargo run`.
 
 | Tab | What it does |
 | --- | --- |
-| **Main** | A welcome card and a live status list: version, server URL, Python sidecar, model readiness. |
-| **Models** | LLM / TTS / STT cards, each with a **Download** button and a progress bar, plus **Download missing** and **Open folder** in the action bar. |
+| **Main** | Just a welcome line. There is nothing to do here yet. |
+| **Models** | LLM / TTS / STT cards with the real size from the Hugging Face API, a **Download** button and a progress bar, plus **Download missing** and **Open folder** in the action bar. |
 | **Account** | Signed out: a **Sign in / Register** form. Signed in: the profile, the **profile picture** picker, the **connections** list and the **Hugging Face token** field. |
 | **Settings** | Audio input/output device pickers (enumerated by the sidecar), the software language, and an About panel with the version, server URL and data folder. |
-| **Plugins** | The three bundled plugins with on/off switches, and **Import plugin** in the action bar. |
+| **Plugins** | The three bundled plugins, sorted, with a 2 of 3 enabled summary, on/off switches, and **Import plugin** in the action bar. |
 
 ### Accounts
 
@@ -65,18 +65,34 @@ you to any machine you sign in on.
 
 ### Hugging Face token
 
-Model downloads use an anonymous quota unless you supply your own token. Paste it
-into **Account → Hugging Face token** and it is stored on the Worker. The app can
-only read *whether* a token exists and when it was saved — the token itself is
-write-only over the API.
+Model downloads use Hugging Face's small anonymous quota unless you supply your
+own token. Paste it into **Account → Hugging Face token** and it is stored on the
+Worker.
+
+The token is then used: the app fetches it back over one dedicated,
+owner-only endpoint and sends it as `Authorization: Bearer` on every model
+request, so downloads run on *your* quota. Every other screen can only see
+*whether* a token exists and when it was saved.
 
 ### The models
 
 | Kind | Model | Repository | Size |
 | --- | --- | --- | --- |
-| LLM | Qwen3.5 2B (GGUF) | [unsloth/Qwen3.5-2B-GGUF](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | ~1.22 GB |
-| TTS | Kitten TTS 2 | [KittenML/kitten-tts-2](https://huggingface.co/KittenML/kitten-tts-2) | ~0.55 GB |
-| STT | Whisper large-v3 turbo | [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) | ~1.55 GB |
+| LLM | Qwen3.5 2B (GGUF) | [unsloth/Qwen3.5-2B-GGUF](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF) | 1.19 GB |
+| TTS | Kitten TTS 2 | [KittenML/kitten-tts-2](https://huggingface.co/KittenML/kitten-tts-2) | 1.49 GB |
+| STT | Whisper large-v3 turbo | [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) | 1.51 GB |
+
+The size on each card comes from the Hugging Face tree API at startup, not from
+the catalog. Until that answers, the card shows a `~`-prefixed fallback.
+
+Two tests check the catalog against the real repositories: one asserts every
+listed file exists (a wrong path only surfaces as a 404 in the middle of a
+download), the other that the fallback sizes are within 10% of reality. Both
+need network, so they are `#[ignore]`d:
+
+```sh
+cargo test -- --ignored
+```
 
 Files land in `%APPDATA%\ProjectRem\models\<model-id>\`. Partial downloads are
 written as `.part` files, so an interrupted download is never mistaken for a

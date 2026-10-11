@@ -158,6 +158,7 @@ pub enum Msg {
     DataFolder,
 
     // Plugins page
+    PluginsSummary,
     PluginsHint,
     NoPlugins,
     ImportPlugin,
@@ -187,7 +188,7 @@ const EN: Table = Table(&[
     (Msg::NavAccount, "Account"),
     (Msg::NavSettings, "Settings"),
     (Msg::NavPlugins, "Plugins"),
-    (Msg::PageMain, "Overview, status and quick facts"),
+    (Msg::PageMain, "Welcome"),
     (Msg::PageModels, "Speech and language models stored on this machine"),
     (Msg::PageAccount, "Sign in, connect services and manage tokens"),
     (Msg::PageSettings, "Audio devices, language and build information"),
@@ -263,6 +264,7 @@ const EN: Table = Table(&[
     (Msg::About, "About"),
     (Msg::Build, "Build"),
     (Msg::DataFolder, "Data folder"),
+    (Msg::PluginsSummary, "{on} of {total} enabled"),
     (Msg::PluginsHint, "Import a folder that contains a plugin.json to add a plugin."),
     (Msg::NoPlugins, "No plugins installed."),
     (Msg::ImportPlugin, "Import plugin"),
@@ -281,7 +283,7 @@ const DE: Table = Table(&[
     (Msg::NavAccount, "Konto"),
     (Msg::NavSettings, "Einstellungen"),
     (Msg::NavPlugins, "Plugins"),
-    (Msg::PageMain, "Überblick, Status und Eckdaten"),
+    (Msg::PageMain, "Willkommen"),
     (Msg::PageModels, "Sprach- und Sprachmodelle auf diesem Rechner"),
     (Msg::PageAccount, "Anmelden, Dienste verbinden, Tokens verwalten"),
     (Msg::PageSettings, "Audiogeräte, Sprache und Build-Informationen"),
@@ -360,10 +362,7 @@ const DE: Table = Table(&[
     (Msg::About, "Über"),
     (Msg::Build, "Build"),
     (Msg::DataFolder, "Datenordner"),
-    (
-        Msg::PluginsHint,
-        "Importiere einen Ordner mit plugin.json, um ein Plugin hinzuzufügen.",
-    ),
+    (Msg::PluginsHint, "Importiere einen Ordner mit plugin.json, um ein Plugin hinzuzufügen."),
     (Msg::NoPlugins, "Keine Plugins installiert."),
     (Msg::ImportPlugin, "Plugin importieren"),
     (Msg::PluginImported, "Plugin importiert."),
@@ -372,6 +371,7 @@ const DE: Table = Table(&[
     (Msg::Remove, "Entfernen"),
     (Msg::OpenFolder, "Ordner öffnen"),
     (Msg::OpenBrowserFailed, "Browser konnte nicht geöffnet werden. Öffne {url}"),
+    (Msg::PluginsSummary, "{on} von {total} aktiviert"),
 ]);
 
 const JA: Table = Table(&[
@@ -381,7 +381,7 @@ const JA: Table = Table(&[
     (Msg::NavAccount, "アカウント"),
     (Msg::NavSettings, "設定"),
     (Msg::NavPlugins, "プラグイン"),
-    (Msg::PageMain, "概要、状態と基本情報"),
+    (Msg::PageMain, "ようこそ"),
     (Msg::PageModels, "このマシンに保存される音声・言語モデル"),
     (Msg::PageAccount, "サインイン、サービスの接続、トークン管理"),
     (Msg::PageSettings, "オーディオデバイス、言語、ビルド情報"),
@@ -457,6 +457,7 @@ const JA: Table = Table(&[
     (Msg::About, "情報"),
     (Msg::Build, "ビルド"),
     (Msg::DataFolder, "データフォルダ"),
+    (Msg::PluginsSummary, "{total} 件中 {on} 件が有効"),
     (Msg::PluginsHint, "plugin.json を含むフォルダをインポートすると追加できます。"),
     (Msg::NoPlugins, "インストール済みプラグインはありません。"),
     (Msg::ImportPlugin, "プラグインをインポート"),
@@ -588,6 +589,7 @@ const ALL_MESSAGES: &[Msg] = &[
     Msg::About,
     Msg::Build,
     Msg::DataFolder,
+    Msg::PluginsSummary,
     Msg::PluginsHint,
     Msg::NoPlugins,
     Msg::ImportPlugin,

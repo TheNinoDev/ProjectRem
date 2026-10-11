@@ -42,8 +42,19 @@ pub struct AudioDevices {
     pub outputs: Vec<DeviceInfo>,
 }
 
-pub struct Sidecar {
-    status: Arc<Mutex<Status>>,
+/// What a finished recording looks like on disk.
+///
+/// The sidecar can capture audio and this wraps the call, but no screen drives
+/// it yet - so it is reachable code without a caller.
+#[allow(dead_code, reason = "no recording UI yet")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recording {
+    pub path: std::path::PathBuf,
+    pub seconds: f64,
+    pub bytes: u64,
+}
+
+pub struct Sidecar {    status: Arc<Mutex<Status>>,
     lines: Option<Receiver<Value>>,
     stdin: Option<Arc<Mutex<ChildStdin>>>,
     child: Option<Child>,
@@ -63,6 +74,46 @@ impl Sidecar {
 
     pub fn status(&self) -> Status {
         *self.status.lock().unwrap()
+    }
+
+    /// A sidecar that is never started, for tests that only exercise layout.
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self::new()
+    }
+
+    /// Record from a microphone until `max_seconds` elapse, writing a WAV.
+    ///
+    /// Blocking: the sidecar cannot answer anything else while this runs, so it
+    /// belongs on a worker thread rather than the UI thread.
+    #[allow(dead_code, reason = "no recording UI yet")]
+    pub fn record(
+        &self,
+        device: Option<&str>,
+        destination: &std::path::Path,
+        max_seconds: f64,
+    ) -> Result<Recording, String> {
+        let reply = self.call(
+            "record",
+            json!({
+                "device": device,
+                "path": destination.to_string_lossy(),
+                "max_seconds": max_seconds,
+            }),
+            std::time::Duration::from_secs(max_seconds.clamp(1.0, 60.0) as u64 + 20),
+        )?;
+        if !reply.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(reply
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("recording failed")
+                .to_owned());
+        }
+        Ok(Recording {
+            path: destination.to_path_buf(),
+            seconds: reply.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+            bytes: reply.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+        })
     }
 
     /// Start the process if it is not running yet.
