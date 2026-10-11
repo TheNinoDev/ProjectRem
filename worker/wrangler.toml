@@ -1,0 +1,17 @@
+name = "projectrem-api"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Storage: a single KV namespace holding accounts, sessions, connections,
+# tokens and bots.
+#
+# The namespace id is not a secret - it appears in every request the Worker
+# makes - but it is account-specific, so push.bat rewrites it from
+# CF_KV_NAMESPACE_ID before deploying. The value below is the development
+# default; a fresh account should set CF_KV_NAMESPACE_ID instead.
+[[kv_namespaces]]
+binding = "PR"
+id = "4ee0ee042dbc434faa4cc6f8f7cb0b9e"
+
+[vars]
+VERSION = "0.0.0"

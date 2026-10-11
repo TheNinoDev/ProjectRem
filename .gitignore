@@ -1,0 +1,30 @@
+# Rust
+/target
+**/target
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Downloads in progress
+*.part
+
+# Secrets - never commit these.
+.env
+.env.*
+!.env.example
+
+# Build output
+/Out/
+*.zip
+
+# Local Cloudflare state. `wrangler dev` writes caches here.
+.wrangler/
+node_modules/

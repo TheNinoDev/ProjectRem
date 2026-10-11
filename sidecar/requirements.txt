@@ -1,0 +1,12 @@
+# ProjectRem Python sidecar — optional dependencies.
+#
+# The sidecar runs with the standard library alone; `sounddevice` is only
+# needed so that the Settings tab can list real audio devices.
+#
+#     pip install -r requirements.txt
+#
+# On Windows, `sounddevice` also needs PortAudio, which pip usually fetches as
+# a wheel. If the install fails, the GUI still works and shows
+# "System default" as the only audio device.
+
+sounddevice>=0.4.6

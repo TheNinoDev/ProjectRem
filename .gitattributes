@@ -1,0 +1,11 @@
+*.rs text eol=crlf
+*.js text eol=crlf
+*.toml text eol=crlf
+*.md text eol=crlf
+*.json text eol=crlf
+*.py text eol=crlf
+*.mjs text eol=crlf
+*.txt text eol=crlf
+*.bat text eol=crlf
+VERSION text eol=lf
+Icon.png binary

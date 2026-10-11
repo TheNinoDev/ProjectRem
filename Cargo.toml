@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["main"]
+default-members = ["main"]
+
+# Profiles have to live at the workspace root, otherwise cargo ignores them.
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# NOTE: there is deliberately no `version` field anywhere in the Cargo
+# manifests. The single source of truth for the version is the `VERSION`
+# file in the repository root. It is read by `main/build.rs` and injected
+# into the binary as the `PROJECTREM_VERSION` environment variable, and it is
+# bumped automatically by `build.bat`. See docs/VERSIONING.md.
