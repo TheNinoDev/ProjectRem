@@ -58,14 +58,31 @@ if not errorlevel 1 (
 
 rem ------------------------------------------------------------- asset
 rem  A zip is what people actually download for a Windows desktop app.
+rem
+rem  The compression runs from a generated .ps1 rather than `-Command`: a long
+rem  quoted one-liner is easy to break, and `powershell -Command` does not
+rem  propagate a non-zero exit code, so a failure would be invisible.
 set "ASSET="
 if exist "!OUT!\" (
     set "ZIP=ProjectRem-!NEW!-windows-x64.zip"
     if exist "!ZIP!" del "!ZIP!"
-    powershell -NoProfile -Command ^
-        "Compress-Archive -LiteralPath '%CD%\!OUT!\*' -DestinationPath '%CD%\!ZIP!' -Force" >nul
-    if errorlevel 1 (
+
+    rem  Written with redirection rather than `echo` lines: cmd treats `(` and
+    rem  `)` inside an echo as block delimiters, which mangles the script.
+    set "PR_OUT=%CD%\!OUT!"
+    set "PR_ZIP=%CD%\!ZIP!"
+    set "PR_SCRIPT=%TEMP%\projectrem-zip-!NEW!.ps1"
+    > "!PR_SCRIPT!" (
+        echo $ErrorActionPreference = 'Stop'
+        echo Compress-Archive -Path "$env:PR_OUT\*" -DestinationPath $env:PR_ZIP -Force
+    )
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File "!PR_SCRIPT!" >nul
+    del "!PR_SCRIPT!" >nul 2>&1
+
+    if not exist "!ZIP!" (
         echo [release] ERROR: could not create the release archive.
+        echo [release]        Check that "!OUT!" is readable and not locked.
         exit /b 1
     )
     set "ASSET=%CD%\!ZIP!"
@@ -75,13 +92,24 @@ if exist "!OUT!\" (
 )
 
 rem -------------------------------------------------------------- publish
+rem  The tag is pushed *before* the release is created. `--verify-tag` makes gh
+rem  check the tag exists on the remote, and gh creates its own tag otherwise -
+rem  which would not match the annotated local one.
 git tag -a "!NEW!" -m "ProjectRem !NEW!"
 if errorlevel 1 (
     echo [release] ERROR: could not create the tag !NEW!.
     exit /b 1
 )
 
-set "BODY=ProjectRem !NEW! ^(previous: !OLD!^).%nl%nl%Windows x64 build. Download the zip, extract it, then run Start-ProjectRem.bat."
+git push origin "!NEW!"
+if errorlevel 1 (
+    echo.
+    echo [release] ERROR: could not push the tag !NEW!.
+    echo [release]        Nothing was released. Fix the remote and re-run.
+    exit /b 1
+)
+
+set "BODY=ProjectRem !NEW! ^(previous: !OLD!^). Windows x64 build. Download the zip, extract it, then run Start-ProjectRem.bat."
 
 if defined ASSET (
     gh release create "!NEW!" "!ASSET!" --title "ProjectRem !NEW!" --notes "!BODY!" --verify-tag
@@ -90,20 +118,12 @@ if defined ASSET (
 )
 if errorlevel 1 (
     echo.
-    echo [release] WARNING: the release was not created.
-    echo [release]          The local tag !NEW! is in place - run
-    echo [release]            git push origin !NEW!
-    echo [release]          and create the release by hand.
+    echo [release] WARNING: the tag !NEW! is pushed, but the release was not created.
+    echo [release]          Create it by hand, or re-run this script.
     exit /b 0
 )
 
-rem  Pushing the tag is what makes the release visible to everyone else.
-git push origin "!NEW!"
-if errorlevel 1 (
-    echo [release] WARNING: could not push the tag. Run: git push origin !NEW!
-    exit /b 0
-)
-
-echo [release] Release v!NEW! is live.
+echo [release] Release !NEW! is live:
+echo [release]   https://github.com/TheNinoDev/ProjectRem/releases/tag/!NEW!
 endlocal
 exit /b 0
