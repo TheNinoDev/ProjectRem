@@ -721,6 +721,7 @@ mod tests {
             Name::Wifi,
             Name::WifiOff,
     ];
+    #[test]
     fn a_circle_becomes_a_ring() {
         let parsed = Name::User.build();
         // `<circle r="4">` plus one path for the shoulders.

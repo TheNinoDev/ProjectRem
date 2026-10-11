@@ -342,19 +342,12 @@ pub struct ProjectRemApp {
     sidecar: Sidecar,
     downloader: Downloader,
     toast: Option<Toast>,
-    #[cfg(feature = "screenshot-hook")]
-    shot_frame: u64,
 }
 
 impl ProjectRemApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = Settings::load();
         let tab = settings.last_tab.as_deref().and_then(Tab::from_slug).unwrap_or(Tab::Main);
-        #[cfg(feature = "screenshot-hook")]
-        let tab = match std::env::var("PROJECTREM_TAB").ok().as_deref().and_then(Tab::from_slug) {
-            Some(forced) => forced,
-            None => tab,
-        };
         let plugins = load_plugins_with_state(&settings.enabled_plugins);
 
         crate::fonts::install(&cc.egui_ctx);
@@ -388,8 +381,6 @@ impl ProjectRemApp {
             sidecar,
             downloader: Downloader::new(),
             toast: None,
-            #[cfg(feature = "screenshot-hook")]
-            shot_frame: 0,
         }
     }
 
@@ -405,8 +396,6 @@ impl ProjectRemApp {
     // ------------------------------------------------------------- frame
 
     fn render(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        #[cfg(feature = "screenshot-hook")]
-        self.verify_screenshot(ui);
         self.avatars.poll(ui.ctx());
         self.pump_downloads();
         self.pump_account();
@@ -1152,44 +1141,6 @@ impl ProjectRemApp {
             });
     }
 
-    /// Development-only: dump one frame so the layout can be eyeballed.
-    #[cfg(feature = "screenshot-hook")]
-    fn verify_screenshot(&mut self, ui: &mut Ui) {
-        use std::io::Write as _;
-        let Some(path) = std::env::var_os("PROJECTREM_SHOT") else { return };
-        self.shot_frame += 1;
-        // egui only paints when something changed, so on an idle page the frame
-        // counter would stall and the capture would never happen. Ask for the
-        // next frame until we have one worth shooting.
-        if self.shot_frame < 20 {
-            ui.ctx().request_repaint_after(Duration::from_millis(24));
-        }
-        // Park the cursor outside the window for the whole capture. egui keeps
-        // a tooltip alive for roughly a second after the pointer leaves, so a
-        // one-off move would still leave stray labels in the dump.
-        // (egui 0.36 has no `ViewportCommand::WarpMouse`, so feed the event.)
-        if (2..20).contains(&self.shot_frame) {
-            ui.ctx().input_mut(|input| {
-                input.events.push(egui::Event::PointerMoved(egui::pos2(-80.0, -80.0)));
-            });
-        }
-        if self.shot_frame == 20 {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(())));
-        }
-        let shot = ui.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        let Some(image) = shot else { return };
-        let [w, h] = image.size;
-        let mut buf = Vec::new();
-        write!(&mut buf, "{w} {h} ").ok();
-        buf.extend_from_slice(image.as_raw());
-        let _ = std::fs::write(path, buf);
-        std::process::exit(0);
-    }
 
     fn shutdown(&mut self) {
         self.sidecar.stop();

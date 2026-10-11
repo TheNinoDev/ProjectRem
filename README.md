@@ -120,8 +120,7 @@ ProjectRem/
 │   ├── main.py              JSON-lines RPC over stdin/stdout
 │   └── requirements.txt     optional: sounddevice
 ├── tools/
-│   ├── fetch-lucide.mjs     regenerates icons_data.rs from Lucide
-│   └── shoot.ps1            screenshots every tab (development only)
+│   └── fetch-lucide.mjs     regenerates icons_data.rs from Lucide
 ├── worker/                  Cloudflare Worker (accounts, connections, bots)
 │   ├── src/index.js
 │   ├── schema.md            KV key layout

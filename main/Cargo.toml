@@ -29,6 +29,3 @@ dirs = "7.0.0"
 # Decoding remote profile pictures (PNG / JPEG / WebP).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
-[features]
-# Temporary development helper: dumps a frame as raw RGBA for visual checks.
-screenshot-hook = []
